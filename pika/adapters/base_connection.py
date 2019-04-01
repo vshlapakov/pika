@@ -3,6 +3,7 @@ connection.Connection class to encapsulate connection behavior but still
 isolate socket and low level communication.
 
 """
+import os
 import errno
 import logging
 import socket
@@ -202,11 +203,12 @@ class BaseConnection(connection.Connection):
         self.socket.settimeout(self.params.socket_timeout)
 
         # Wrap socket if using SSL
+        ssl_text = ""
         if self.params.ssl:
-            self.socket = self._wrap_socket(self.socket)
-            ssl_text = " with SSL"
-        else:
-            ssl_text = ""
+            context = self._get_ssl_context()
+            if context:
+                self.socket = self._wrap_socket(context)
+                ssl_text = " with SSL"
 
         LOGGER.info('Connecting to %s:%s%s', sock_addr_tuple[4][0],
                     sock_addr_tuple[4][1], ssl_text)
@@ -480,12 +482,43 @@ class BaseConnection(connection.Connection):
             self.event_state = self.base_events
             self.ioloop.update_handler(self.socket.fileno(), self.event_state)
 
-    def _wrap_socket(self, sock):
+    def _wrap_socket(self, context):
         """Wrap the socket for connecting over SSL.
 
         :rtype: ssl.SSLSocket
 
         """
-        return ssl.wrap_socket(sock,
-                               do_handshake_on_connect=self.DO_HANDSHAKE,
-                               **self.params.ssl_options)
+        return context.wrap_socket(
+            self.socket, do_handshake_on_connect=self.DO_HANDSHAKE
+        )
+
+    def _get_ssl_context(self):
+        opts = self.params.ssl_options
+        cxt = None
+        if 'ca_certs' in opts:
+            opt_ca_certs = opts['ca_certs']
+            if os.path.isfile(opt_ca_certs):
+                cxt = ssl.create_default_context(cafile=opt_ca_certs)
+            elif os.path.isdir(opt_ca_certs):
+                cxt = ssl.create_default_context(capath=opt_ca_certs)
+            else:
+                LOGGER.warning('ca_certs is specified via ssl_options but '
+                                'is neither a valid file nor directory: "%s"',
+                                opt_ca_certs)
+        if 'certfile' in opts:
+            if os.path.isfile(opts['certfile']):
+                keyfile = opts.get('keyfile')
+                password = opts.get('password')
+                cxt.load_cert_chain(opts['certfile'], keyfile, password)
+            else:
+                LOGGER.warning('certfile is specified via ssl_options but '
+                                'is not a valid file: "%s"',
+                                opts['certfile'])
+        if 'ciphers' in opts:
+            opt_ciphers = opts['ciphers']
+            if opt_ciphers is not None:
+                cxt.set_ciphers(opt_ciphers)
+            else:
+                LOGGER.warning('ciphers specified in ssl_options but '
+                                'evaluates to None')
+        return cxt
